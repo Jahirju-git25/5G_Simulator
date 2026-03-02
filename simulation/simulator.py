@@ -42,6 +42,9 @@ class NetworkSimulator:
         self.metrics_history = []
         self.total_handovers = 0
         self.packet_loss_rate = 0
+        self.cumulative_throughput = 0.0  # Mb
+        self.avg_throughput_overall = 0.0  # Mbps
+        self.step_time = 0.0  # Total elapsed time in seconds
         
         # Thread
         self.sim_thread = None
@@ -90,7 +93,8 @@ class NetworkSimulator:
             self.ues[ue.id] = ue
             
             # Initial attachment to best gNB
-            self._attach_ue(ue)
+            if self.gnbs:
+                self._attach_ue(ue)
             self._log_event(f"Added {ue.id} at ({x:.0f}, {y:.0f}) - attached to {ue.serving_gnb_id}")
             return ue.id
 
@@ -140,6 +144,7 @@ class NetworkSimulator:
             self.running = True
             self.sim_thread = threading.Thread(target=self._simulation_loop, daemon=True)
             self.sim_thread.start()
+            print(f"Thread started: {self.sim_thread.is_alive()}", flush=True)
             self._log_event("Simulation started")
 
     def stop(self):
@@ -154,11 +159,22 @@ class NetworkSimulator:
 
     def _simulation_loop(self):
         """Main simulation loop"""
-        while self.running:
-            step_start = time.time()
-            
-            with self.lock:
-                self._execute_step()
+        print("SIMULATION LOOP STARTED", flush=True)
+        try:
+            while self.running:
+                step_start = time.time()
+                
+                with self.lock:
+                    self._execute_step()
+                
+                elapsed = time.time() - step_start
+                sleep_time = (self.step_duration / self.speed_factor) - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        except Exception as e:
+            import traceback
+            print("SIMULATION LOOP CRASHED:", e, flush=True)
+            traceback.print_exc()
             
             # Sleep to maintain real-time pace
             elapsed = time.time() - step_start
@@ -171,12 +187,17 @@ class NetworkSimulator:
         self.step += 1
         self.sim_time = round(self.step * self.step_duration, 2)
 
+        if not self.ues or not self.gnbs:
+            return
+
         # Update UE positions
         for ue in self.ues.values():
             ue.update_position(self.step_duration)
 
-        # Calculate radio metrics for all UEs
+        # Reattach any unserved UEs then calculate metrics
         for ue in self.ues.values():
+            if not ue.serving_gnb_id or ue.serving_gnb_id not in self.gnbs:
+                self._attach_ue(ue)
             self._calculate_ue_metrics(ue)
 
         # Check handover conditions
@@ -186,17 +207,19 @@ class NetworkSimulator:
         # Update gNB metrics
         for gnb in self.gnbs.values():
             gnb.total_throughput = sum(
-                self.ues[uid].throughput 
-                for uid in gnb.connected_ues 
+                self.ues[uid].throughput
+                for uid in gnb.connected_ues
                 if uid in self.ues
             )
 
-        # Collect global metrics
+        # Collect global metrics  ← THIS LINE MUST EXIST
         self._collect_global_metrics()
 
     def _calculate_ue_metrics(self, ue):
         """Calculate RSRP, SINR, throughput for a UE"""
+        print(f"CALC: {ue.id} serving={ue.serving_gnb_id} gnbs={list(self.gnbs.keys())}")
         if not ue.serving_gnb_id or ue.serving_gnb_id not in self.gnbs:
+            print(f"  -> SKIPPED (no serving gnb)")
             return
         
         serving_gnb = self.gnbs[ue.serving_gnb_id]
@@ -315,22 +338,37 @@ class NetworkSimulator:
         self._log_event(f"Handover: {ue.id} {old_gnb_id} → {target_gnb_id} (RSRP: {ue.rsrp:.1f} dBm)")
 
     def _collect_global_metrics(self):
-        """Collect network-wide metrics"""
-        if not self.ues:
-            return
-        
-        total_tp = sum(ue.throughput for ue in self.ues.values())
-        avg_sinr = sum(ue.sinr for ue in self.ues.values()) / len(self.ues)
-        avg_rsrp = sum(ue.rsrp for ue in self.ues.values()) / len(self.ues)
-        
+        """Collect network-wide metrics (called every step).
+
+        Rather than bail out when no UEs/gNBs are present we always update the
+        cumulative/average counters so the dashboard values never disappear.  The
+        returned metrics will simply be zero when nothing is attached.
+        """
+        # Recalculate total_tp fresh from current UE measurements
+        total_tp = 0.0
+        if self.ues and self.gnbs:
+            for ue in self.ues.values():
+                if ue.serving_gnb_id and ue.serving_gnb_id in self.gnbs:
+                    total_tp += ue.throughput
+
+        avg_sinr = (sum(ue.sinr for ue in self.ues.values()) / len(self.ues)) if self.ues else 0.0
+        avg_rsrp = (sum(ue.rsrp for ue in self.ues.values()) / len(self.ues)) if self.ues else 0.0
+
+        # Accumulate throughput every step (Mb = Mbps * seconds)
+        if self.sim_time > 0:
+            self.cumulative_throughput += max(total_tp, 0) * self.step_duration
+            self.avg_throughput_overall = round(self.cumulative_throughput / self.sim_time, 2)
+
         # Estimate packet loss (UEs with SINR < -5 dB)
         poor_ues = sum(1 for ue in self.ues.values() if ue.sinr < -5)
         self.packet_loss_rate = round(poor_ues / max(len(self.ues), 1) * 100, 1)
-        
+
         metric = {
             'time': self.sim_time,
             'step': self.step,
             'total_throughput': round(total_tp, 2),
+            'cumulative_throughput': round(self.cumulative_throughput, 2),
+            'avg_throughput_overall': self.avg_throughput_overall,
             'avg_sinr': round(avg_sinr, 2),
             'avg_rsrp': round(avg_rsrp, 2),
             'packet_loss': self.packet_loss_rate,
@@ -369,6 +407,8 @@ class NetworkSimulator:
                 'event_log': self.event_log[-30:],
                 'global': {
                     'total_throughput': sum(u.throughput for u in self.ues.values()),
+                    'cumulative_throughput': round(self.cumulative_throughput, 2),
+                    'avg_throughput_overall': self.avg_throughput_overall,
                     'avg_sinr': sum(u.sinr for u in self.ues.values()) / max(len(self.ues), 1),
                     'packet_loss': self.packet_loss_rate,
                     'total_handovers': self.total_handovers,
@@ -406,4 +446,6 @@ class NetworkSimulator:
             self.metrics_history.clear()
             self.total_handovers = 0
             self.packet_loss_rate = 0
+            self.cumulative_throughput = 0.0
+            self.avg_throughput_overall = 0.0
         self._log_event("Simulation reset")

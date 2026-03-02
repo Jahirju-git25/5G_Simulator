@@ -255,36 +255,34 @@ class ChannelModel:
             return 28, '64QAM', 0.93
 
     def _cqi_throughput(self, sinr_db, bandwidth_hz):
-        """CQI-based throughput calculation"""
-        # Resource blocks in 100 MHz @ 30kHz SCS
-        n_rb = 66  # 100 MHz / (12 subcarriers * 30 kHz)
-        
-        # CQI table mapping
+        """CQI-based throughput calculation - fixed thresholds"""
+        # CQI table: (min_sinr_dB, throughput_bps)
+        # Realistic 5G NR 100MHz 4x4 MIMO values
         cqi_table = [
-            (-6, 0),      # CQI 1: QPSK 0.1523
-            (-3, 200e3),  # CQI 2
-            (0, 500e3),   # CQI 3
-            (3, 1e6),     # CQI 4
-            (6, 2e6),     # CQI 5
-            (9, 5e6),     # CQI 6
-            (12, 10e6),   # CQI 7
-            (15, 20e6),   # CQI 8
-            (18, 50e6),   # CQI 9
-            (20, 80e6),   # CQI 10
-            (22, 120e6),  # CQI 11
-            (25, 200e6),  # CQI 12
-            (28, 300e6),  # CQI 13
-            (30, 400e6),  # CQI 14
-            (35, 500e6),  # CQI 15
+            (-10, 1e6),    # CQI 1:  QPSK  ~1 Mbps
+            (-6,  2e6),    # CQI 2:  QPSK  ~2 Mbps
+            (-3,  5e6),    # CQI 3:  QPSK  ~5 Mbps
+            (0,   10e6),   # CQI 4:  QPSK  ~10 Mbps
+            (3,   20e6),   # CQI 5:  QPSK  ~20 Mbps
+            (6,   40e6),   # CQI 6:  16QAM ~40 Mbps
+            (9,   70e6),   # CQI 7:  16QAM ~70 Mbps
+            (12,  110e6),  # CQI 8:  16QAM ~110 Mbps
+            (15,  160e6),  # CQI 9:  64QAM ~160 Mbps
+            (18,  220e6),  # CQI 10: 64QAM ~220 Mbps
+            (21,  280e6),  # CQI 11: 64QAM ~280 Mbps
+            (24,  350e6),  # CQI 12: 64QAM ~350 Mbps
+            (27,  420e6),  # CQI 13: 256QAM ~420 Mbps
+            (30,  480e6),  # CQI 14: 256QAM ~480 Mbps
+            (33,  550e6),  # CQI 15: 256QAM ~550 Mbps
         ]
-        
+
         throughput = 0
         for threshold, tp in cqi_table:
             if sinr_db >= threshold:
                 throughput = tp
-        
-        # Scale by MIMO layers (4x4 MIMO)
-        return throughput * 2.5  # Simplified MIMO gain
+
+        # 4x4 MIMO spatial multiplexing gain (already baked in above values)
+        return throughput
 
     def calculate_rsrq(self, rsrp_dbm, rssi_dbm):
         """Reference Signal Received Quality"""

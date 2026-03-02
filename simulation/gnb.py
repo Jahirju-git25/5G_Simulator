@@ -10,7 +10,7 @@ class gNB:
 
     gnb_counter = 0
 
-    def __init__(self, x, y, tx_power_dbm=43, antenna_gain_db=15, num_sectors=3):
+    def __init__(self, x, y, tx_power_dbm=43, antenna_gain_db=15, num_sectors=1):
         gNB.gnb_counter += 1
         self.id = f"gNB-{gNB.gnb_counter}"
         self.x = x
@@ -62,22 +62,8 @@ class gNB:
         return best_sector
 
     def get_sector_gain(self, ue_x, ue_y):
-        """Calculate antenna gain based on sector pattern"""
-        sector_idx = self.get_sector_for_ue(ue_x, ue_y)
-        sector = self.sectors[sector_idx]
-
-        angle_rad = math.atan2(ue_y - self.y, ue_x - self.x)
-        angle_deg = math.degrees(angle_rad) % 360
-        
-        angle_diff = angle_deg - sector['azimuth']
-        if angle_diff > 180: angle_diff -= 360
-        if angle_diff < -180: angle_diff += 360
-
-        # 3GPP antenna pattern
-        hpbw = sector['half_power_bw']
-        am = 30  # max attenuation dB
-        gain_reduction = min(12 * (angle_diff / hpbw)**2, am)
-        return self.antenna_gain_db - gain_reduction
+        """Omni antenna = uniform gain in all directions"""
+        return self.antenna_gain_db
 
     def add_neighbor(self, gnb):
         """Add Xn interface neighbor"""

@@ -33,7 +33,7 @@ def add_gnb():
         x=data.get('x', 400),
         y=data.get('y', 300),
         tx_power=data.get('tx_power', 43),
-        num_sectors=data.get('num_sectors', 3)
+        num_sectors=data.get('num_sectors', 1)
     )
     return jsonify({'success': True, 'gnb_id': gnb_id})
 

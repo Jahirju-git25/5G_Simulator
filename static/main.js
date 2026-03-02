@@ -200,13 +200,22 @@ function NetworkCanvas({ state, onPlaceGnb, onPlaceUe, placeMode, selectedUe, se
     ctx.beginPath(); ctx.moveTo(ue.x,ue.y); ctx.quadraticCurveTo(cpx,cpy,gnb.x,gnb.y); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
   }
   function drawSectors(ctx, gnb) {
-    if (!gnb.sectors) return;
-    gnb.sectors.forEach(sector => {
-      ctx.save();
-      const az=(sector.azimuth*Math.PI/180)-Math.PI/2, spread=65*Math.PI/180;
-      ctx.strokeStyle='rgba(88,166,255,0.15)'; ctx.fillStyle='rgba(88,166,255,0.04)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(gnb.x,gnb.y); ctx.arc(gnb.x,gnb.y,80,az-spread/2,az+spread/2); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
-    });
+    // Draw sector boundaries for sectorized gNBs (skip for omnidirectional)
+    if (gnb.num_sectors <= 1) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(88,166,255,0.2)';
+    ctx.lineWidth = 1;
+    const radius = 100;
+    for (let i = 0; i < gnb.num_sectors; i++) {
+      const azimuth = (gnb.sectors[i]?.azimuth || 0) * Math.PI / 180;
+      const nextAzimuth = azimuth + (2 * Math.PI / gnb.num_sectors);
+      ctx.beginPath();
+      ctx.moveTo(gnb.x, gnb.y);
+      ctx.arc(gnb.x, gnb.y, radius, azimuth - Math.PI / gnb.num_sectors, azimuth + Math.PI / gnb.num_sectors);
+      ctx.lineTo(gnb.x, gnb.y);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
   function drawGnB(ctx, gnb, hovered) {
     const x=gnb.x, y=gnb.y, size=hovered?22:18;
@@ -229,8 +238,11 @@ function NetworkCanvas({ state, onPlaceGnb, onPlaceUe, placeMode, selectedUe, se
     }
     ctx.restore();
   }
-  function drawUE(ctx, ue, selected, hovered) {
-    const x=ue.x, y=ue.y, size=selected?10:8, color=sinrColor(ue.sinr);
+   function drawUE(ctx, ue, selected, hovered) {
+    const x=ue.x, y=ue.y, size=selected?10:8;
+    // Force correct color based on SINR thresholds
+    const sinr = ue.sinr ?? -999;
+    const color = sinr > 20 ? '#3fb950' : sinr > 10 ? '#58a6ff' : sinr > 0 ? '#d29922' : '#f85149';
     const r=parseInt(color.slice(1,3),16), g=parseInt(color.slice(3,5),16), b=parseInt(color.slice(5,7),16);
     ctx.save();
     if (selected||hovered) { ctx.shadowColor=color; ctx.shadowBlur=12; }
@@ -273,10 +285,10 @@ function NetworkCanvas({ state, onPlaceGnb, onPlaceUe, placeMode, selectedUe, se
       />
       <div className="legend" style={{ position:'absolute', bottom:8, left:8, background:'rgba(13,17,23,0.8)', borderRadius:6, padding:'4px 8px' }}>
         <div className="legend-item"><div className="legend-dot" style={{background:'#58a6ff'}}></div>gNB</div>
-        <div className="legend-item"><div className="legend-dot" style={{background:'#3fb950'}}></div>UE (Good)</div>
-        <div className="legend-item"><div className="legend-dot" style={{background:'#d29922'}}></div>UE (Fair)</div>
-        <div className="legend-item"><div className="legend-dot" style={{background:'#f85149'}}></div>UE (Poor)</div>
-        <div className="legend-item" style={{marginLeft:8, color:'#6e7681'}}>Drag to move • Right-click to remove</div>
+        <div className="legend-item"><div className="legend-dot" style={{background:'#3fb950'}}></div>UE (Excellent &gt;20dB)</div>
+        <div className="legend-item"><div className="legend-dot" style={{background:'#58a6ff', border:'1px solid #fff'}}></div>UE (Good 10-20dB)</div>
+        <div className="legend-item"><div className="legend-dot" style={{background:'#d29922'}}></div>UE (Fair 0-10dB)</div>
+        <div className="legend-item"><div className="legend-dot" style={{background:'#f85149'}}></div>UE (Poor &lt;0dB)</div>
       </div>
       {tooltip && (
         <div className="canvas-tooltip" style={{ left: tooltip.x - canvasRef.current?.getBoundingClientRect().left + 12, top: tooltip.y - canvasRef.current?.getBoundingClientRect().top - 10, position:'absolute', zIndex:50 }}>
@@ -845,10 +857,19 @@ function RightPanel({ state, selectedUe }) {
           <>
             <div className="stat-grid">
               <div className="stat-card">
-                <div className="stat-card-value" style={{ color: '#3fb950' }} title={String(globalStats.total_throughput || 0)}>
-                  {formatThroughput(latestTotal)}
+                <div className="stat-card-value" style={{ color: '#3fb950' }}>
+                  {globalStats.total_throughput?.toFixed(0) || 0}<span style={{fontSize:10}}> Mbps</span>
                 </div>
-                <div className="stat-card-label">Total Throughput</div>
+                <div className="stat-card-label">Instant Throughput</div>
+              </div>
+              <div className="stat-card" style={{gridColumn:'1/-1'}}>
+                <div className="stat-card-value" style={{ color: '#39d353', fontSize:14 }}>
+                  {globalStats.cumulative_throughput?.toFixed(1) || 0}<span style={{fontSize:10}}> Mb</span>
+                  <span style={{fontSize:11, color:'#6e7681', marginLeft:8}}>
+                    avg {globalStats.avg_throughput_overall?.toFixed(1) || 0} Mbps
+                  </span>
+                </div>
+                <div className="stat-card-label">Total Network Throughput (simulation period)</div>
               </div>
               <div className="stat-card">
                 <div className="stat-card-value" style={{ color: '#58a6ff' }} title={String(latestAvgPerUe || 0)}>
@@ -1166,13 +1187,12 @@ function TopNav({ state, scenario }) {
       </div>
 
       {[
-        ['Total TP', formatThroughput(latestTotal), latestTotal > 100 ? 'good' : 'warn'],
-        ['Avg TP/UE', formatThroughput(latestAvgPerUe), ''],
+        ['Instant TP', `${(globalStats.total_throughput || 0).toFixed(0)} Mbps`, globalStats.total_throughput > 100 ? 'good' : 'warn'],
+        ['Cumul. TP', `${(globalStats.cumulative_throughput ?? 0).toFixed(1)} Mb`, 'good'],
+        ['Avg TP', `${(globalStats.avg_throughput_overall ?? 0).toFixed(1)} Mbps`, ''],
         ['Avg SINR', `${(globalStats.avg_sinr || 0).toFixed(1)} dB`, globalStats.avg_sinr > 10 ? 'good' : globalStats.avg_sinr > 0 ? 'warn' : 'bad'],
         ['Pkt Loss', `${globalStats.packet_loss || 0}%`, globalStats.packet_loss < 5 ? 'good' : globalStats.packet_loss < 20 ? 'warn' : 'bad'],
         ['Handovers', globalStats.total_handovers || 0, ''],
-        ['gNBs', globalStats.num_gnbs || 0, ''],
-        ['UEs', globalStats.num_ues || 0, ''],
         ['Step', state?.step || 0, ''],
       ].map(([label, value, cls]) => (
         <div key={label} className="nav-stat">
@@ -1207,9 +1227,33 @@ function App() {
   const [selectedUe, setSelectedUe] = useState(null);
   const [params, setParams] = useState({ hysteresis: 3.0, ttt: 3 });
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
+  const [darkMode, setDarkMode] = useState(true);
   const [simDuration, setSimDuration] = useState(10);
   const simTimerRef = useRef(null);
 
+   // Apply theme to root CSS variables
+  useEffect(() => {
+    const root = document.documentElement;
+    if (darkMode) {
+      root.style.setProperty('--bg-primary',   '#0d1117');
+      root.style.setProperty('--bg-secondary', '#161b22');
+      root.style.setProperty('--bg-card',      '#1c2128');
+      root.style.setProperty('--bg-hover',     '#222930');
+      root.style.setProperty('--border',       '#30363d');
+      root.style.setProperty('--text-primary', '#e6edf3');
+      root.style.setProperty('--text-secondary','#9a9c9c');
+      root.style.setProperty('--text-muted',   '#6e7681');
+    } else {
+      root.style.setProperty('--bg-primary',   '#ffffff');
+      root.style.setProperty('--bg-secondary', '#f6f8fa');
+      root.style.setProperty('--bg-card',      '#ffffff');
+      root.style.setProperty('--bg-hover',     '#eaeef2');
+      root.style.setProperty('--border',       '#d0d7de');
+      root.style.setProperty('--text-primary', '#1f2328');
+      root.style.setProperty('--text-secondary','#656d76');
+      root.style.setProperty('--text-muted',   '#9198a1');
+    }
+  }, [darkMode]);
   // SSE real-time connection
   useEffect(() => {
     // Initial state fetch
@@ -1330,24 +1374,56 @@ function App() {
           setSelectedUe={setSelectedUe}
           onCursorMove={setCursorPos}
         />
-        {/* Cursor coordinate bar */}
+        {/* Cursor coordinate bar + theme toggle */}
       <div style={{
         flexShrink: 0, padding: '4px 12px',
-        background: '#161b22', borderTop: '1px solid #30363d',
+        background: 'var(--bg-secondary)', borderTop: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', gap: 16, fontSize: 11
       }}>
-        <span style={{ color: '#6e7681' }}>Canvas Cursor:</span>
+        <span style={{ color: 'var(--text-muted)' }}>Canvas Cursor:</span>
         <span style={{ color: '#58a6ff', fontFamily: 'monospace' }}>
           X: <strong>{cursorPos.x} px</strong> ({(cursorPos.x * 5).toFixed(0)} m)
         </span>
         <span style={{ color: '#58a6ff', fontFamily: 'monospace' }}>
           Y: <strong>{cursorPos.y} px</strong> ({(cursorPos.y * 5).toFixed(0)} m)
         </span>
-        <span style={{ color: '#6e7681' }}>|</span>
+        <span style={{ color: 'var(--text-muted)' }}>|</span>
         <span style={{ color: '#3fb950', fontFamily: 'monospace' }}>
           gNBs: {Object.keys(state?.gnbs||{}).length} &nbsp;|&nbsp; UEs: {Object.keys(state?.ues||{}).length}
         </span>
         {placeMode && <span style={{ color: '#d29922' }}>📍 Placing: {placeMode.toUpperCase()}</span>}
+
+        {/* Theme toggle — pushed to right */}
+        <div style={{ marginLeft: 'auto' }}>
+          <button
+            onClick={() => setDarkMode(d => !d)}
+            title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '4px 12px', borderRadius: 20, cursor: 'pointer',
+              border: `1px solid ${darkMode ? '#58a6ff' : '#d0d7de'}`,
+              background: darkMode ? '#161b22' : '#ffffff',
+              color: darkMode ? '#e6edf3' : '#1f2328',
+              fontSize: 11, fontWeight: 600, transition: 'all 0.3s'
+            }}
+          >
+            {/* Toggle track */}
+            <div style={{
+              width: 32, height: 16, borderRadius: 8, position: 'relative',
+              background: darkMode ? '#58a6ff' : '#d0d7de',
+              transition: 'background 0.3s'
+            }}>
+              <div style={{
+                position: 'absolute', top: 2,
+                left: darkMode ? 18 : 2,
+                width: 12, height: 12, borderRadius: '50%',
+                background: '#fff', transition: 'left 0.3s',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+              }} />
+            </div>
+            {darkMode ? '🌙 Dark' : '☀️ Light'}
+          </button>
+        </div>
       </div>
       </div>
 
