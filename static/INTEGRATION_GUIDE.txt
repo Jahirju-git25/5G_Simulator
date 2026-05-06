@@ -1,0 +1,14 @@
+// ═══════════════════════════════════════════════════════════════════
+//  INTEGRATION INSTRUCTIONS for main.js
+//  Add the following inside the Sidebar component's JSX return,
+//  inside the "Simulation" <div className="sidebar-section"> block,
+//  BEFORE the Start/Stop buttons:
+//
+//     <AnchorStatusPanel state={state}/>
+//
+//  The AnchorStatusPanel component is defined in anchor_panel.js
+//  which is already loaded in index.html before main.js.
+//
+//  Also add  state={state}  to the <Sidebar ...> call in App() if
+//  it isn't already there (it is in the original).
+// ═══════════════════════════════════════════════════════════════════
