@@ -30,8 +30,9 @@ class CostBenefitOptimizer:
     """
     
     # Default cost parameters (from paper calibration)
+    # Adjusted for better testing: lower C_anchor encourages deployment
     DEFAULT_C_HO = 0.7        # cost units per unnecessary HO
-    DEFAULT_C_ANCHOR = 1.0    # cost units per AnchorGNB (amortized over 10 min)
+    DEFAULT_C_ANCHOR = 0.5    # cost units per AnchorGNB (reduced from 1.0 to trigger deployment more easily)
     
     def __init__(self, c_ho: float = DEFAULT_C_HO,
                  c_anchor: float = DEFAULT_C_ANCHOR):

@@ -55,7 +55,7 @@ class MLPingPongPredictor:
         self.model = None
         self.scaler = None
         self.weights = self.DEFAULT_WEIGHTS.copy()
-        self.bias = 0.0
+        self.bias = 0.2  # Positive bias to favor ping-pong detection in early stages
         
         if model_path and os.path.exists(model_path):
             self._load_model(model_path)

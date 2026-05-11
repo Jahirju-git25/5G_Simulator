@@ -133,6 +133,7 @@ class UE:
             'distance':         self.distance,
             'modulation':       self.modulation,
             'handover_count':   self.handover_count,
+            'handover_history': self.handover_history,  # CRITICAL: ML detector needs this
             'ping_pong_count':  self.ping_pong_count,
             'velocity':         round(self.get_velocity(), 2),
             'mobility_model':   self.mobility.model_type,

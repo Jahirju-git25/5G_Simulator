@@ -26,6 +26,10 @@ import argparse
 import sys
 from typing import Dict, List, Optional
 from datetime import datetime
+import warnings
+
+# Suppress expected sklearn warnings (unfitted model falls back to manual sigmoid)
+warnings.filterwarnings('ignore', message='.*LogisticRegression instance is not fitted.*')
 
 # Import ML detector
 from ml_pingpong.detector import MLPingPongDetector
@@ -41,7 +45,7 @@ class ExternalMLDetectorClient:
       POST /api/assign_dc            — Assign UE to DC
     """
     
-    def __init__(self, simulator_url: str = "http://localhost:5000",
+    def __init__(self, simulator_url: str = "http://localhost:8080",
                  eval_interval: float = 0.5,
                  model_path: Optional[str] = None,
                  verbose: bool = False):
@@ -104,6 +108,9 @@ class ExternalMLDetectorClient:
                 try:
                     self._eval_cycle()
                     iteration += 1
+                except KeyboardInterrupt:
+                    # Propagate simulation-end signal to outer handler
+                    raise
                 except Exception as e:
                     self.errors += 1
                     print(f"[ERROR] Evaluation cycle failed: {e}")
@@ -127,6 +134,13 @@ class ExternalMLDetectorClient:
         if not state:
             return
         
+        # Check if simulation has ended
+        is_running = state.get('running', False)
+        if not is_running and self.eval_count > 0:
+            if self.verbose:
+                print(f"[ML Detector] Simulation ended. Terminating detector.")
+            raise KeyboardInterrupt("Simulation completed")
+        
         current_time = state.get('sim_time', 0.0)
         all_ues = state.get('ues', {})
         
@@ -145,6 +159,10 @@ class ExternalMLDetectorClient:
                 self._deploy_anchor(decision)
         
         self.eval_count += 1
+        
+        # Update simulator with detector status (every 5 cycles or after deployments)
+        if self.eval_count % 5 == 0 or decisions:
+            self._update_simulator_status()
         
         if self.verbose:
             print(f"[{self.eval_count}] Cycle at t={current_time:.1f}s, "
@@ -218,6 +236,25 @@ class ExternalMLDetectorClient:
         except Exception as e:
             if self.verbose:
                 print(f"  [WARNING] Failed to assign DC to {ue_id}: {e}")
+    
+    def _update_simulator_status(self) -> None:
+        """Send detector status to simulator (for test queries)."""
+        try:
+            detector_status = self.detector.get_status()
+            url = f"{self.simulator_url}/api/update_detector_status"
+            payload = {
+                'evaluation_steps': self.eval_count,
+                'active_anchors': detector_status.get('active_anchors', []),
+                'cost_benefit_rejections': detector_status.get('cost_benefit_rejections', 0),
+                'false_positives': detector_status.get('false_positives', 0),
+                'ue_count': len(self.detector.ue_data),
+                'errors': self.errors,
+            }
+            resp = requests.post(url, json=payload, timeout=5.0)
+            resp.raise_for_status()
+        except Exception as e:
+            if self.verbose:
+                print(f"  [WARNING] Failed to update simulator status: {e}")
     
     # ─────────────────────────────────────────────────────────────────────────
     # Data Conversion
@@ -299,7 +336,7 @@ def main():
     )
     parser.add_argument(
         '--simulator-url',
-        default='http://localhost:5000',
+        default='http://localhost:8080',
         help='Base URL of simulator Flask backend'
     )
     parser.add_argument(

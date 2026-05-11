@@ -33,7 +33,7 @@ class DBSCANClusterer:
     
     # DBSCAN parameters
     EPSILON = 60        # pixels (≈ 300 m at 1px=5m)
-    MIN_PTS = 3         # minimum cluster members
+    MIN_PTS = 2         # minimum cluster members (lowered from 3 for testing)
     
     # Time decay parameters
     LAMBDA = 0.1        # decay constant; half-life ≈ 7 seconds

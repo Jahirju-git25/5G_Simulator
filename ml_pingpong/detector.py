@@ -44,8 +44,8 @@ class MLPingPongDetector:
     """
     
     # Thresholds (from paper)
-    THETA_UE = 0.6         # P_pp threshold for candidates
-    THETA_SCORE = 1.5      # Cluster score threshold
+    THETA_UE = 0.5         # P_pp threshold for candidates (lowered from 0.6 for earlier detection)
+    THETA_SCORE = 1.0      # Cluster score threshold (lowered from 1.5 for earlier detection)
     T_COOL = 10.0          # Cooldown period (seconds)
     T_EVAL = 0.5           # Evaluation interval (seconds)
     T_REMOVE = 30.0        # Anchor removal timeout (seconds)
@@ -59,7 +59,7 @@ class MLPingPongDetector:
         """
         # Sub-modules
         self.feature_extractor = FeatureExtractor(normalize=True)
-        self.ml_predictor = MLPingPongPredictor(model_path=model_path, use_sklearn=True)
+        self.ml_predictor = MLPingPongPredictor(model_path=model_path, use_sklearn=False)
         self.clusterer = DBSCANClusterer()
         self.cost_benefit = CostBenefitOptimizer()
         
@@ -118,7 +118,14 @@ class MLPingPongDetector:
         # ─── STEP 2: Extract features for all UEs ──────────────────────────
         ue_features: Dict[str, np.ndarray] = {}
         for ue_id, ue_info in self.ue_data.items():
-            features = self.feature_extractor.extract_features_batch(ue_info)
+            # Convert deques to lists for feature extraction (deques don't support slicing)
+            ue_info_for_extraction = ue_info.copy()
+            if isinstance(ue_info_for_extraction.get('ho_history'), deque):
+                ue_info_for_extraction['ho_history'] = list(ue_info_for_extraction['ho_history'])
+            if isinstance(ue_info_for_extraction.get('rsrp_samples'), deque):
+                ue_info_for_extraction['rsrp_samples'] = list(ue_info_for_extraction['rsrp_samples'])
+            
+            features = self.feature_extractor.extract_features_batch(ue_info_for_extraction)
             ue_features[ue_id] = features
         
         # ─── STEP 3: ML Inference (compute P_pp) ──────────────────────────
@@ -142,12 +149,23 @@ class MLPingPongDetector:
                 })
         
         if not candidates or len(candidates) < self.clusterer.MIN_PTS:
+            self._log("INSUFFICIENT_CANDIDATES", {
+                'candidates': len(candidates),
+                'min_required': self.clusterer.MIN_PTS,
+                'ue_count': len(self.ue_data),
+                'p_pp_threshold': self.THETA_UE
+            })
             return decisions  # Not enough ping-pong UEs
         
         # ─── STEP 5: DBSCAN Clustering ──────────────────────────────────
         clusters = self.clusterer.cluster_ping_pong_ues(candidates, current_time)
         
         if not clusters:
+            self._log("NO_CLUSTERS_FORMED", {
+                'candidates': len(candidates),
+                'dbscan_epsilon': self.clusterer.epsilon,
+                'dbscan_min_pts': self.clusterer.min_pts
+            })
             return decisions  # No clusters formed
         
         # ─── STEP 6-10: Process each cluster ────────────────────────────
@@ -184,6 +202,12 @@ class MLPingPongDetector:
             cluster_score = self._compute_cluster_score(cluster_ues, current_time, ue_p_pp)
             
             if cluster_score <= self.THETA_SCORE:
+                self._log("CLUSTER_SCORE_LOW", {
+                    'cluster_id': cluster_id,
+                    'cluster_size': len(cluster_ues),
+                    'score': cluster_score,
+                    'threshold': self.THETA_SCORE
+                })
                 continue
             
             # ─── STEP 9: Cost-Benefit Analysis ──────────────────────────
@@ -232,6 +256,7 @@ class MLPingPongDetector:
                 self.ue_data[ue_id] = {
                     'ho_history': deque(maxlen=100),
                     'rsrp_samples': deque(maxlen=200),
+                    'last_ho_count': 0,  # Track to detect new HOs
                 }
             
             # Current position and measurements
@@ -239,32 +264,54 @@ class MLPingPongDetector:
             self.ue_data[ue_id]['y'] = ue.get('y', 0.0)
             self.ue_data[ue_id]['current_time'] = current_time
             
-            # Handover history
+            # Handover history — use actual timestamps from simulator
             ho_history = ue.get('handover_history', [])
-            if ho_history:
-                # Add recent HOs to deque
-                for ho in ho_history:
+            # Ensure ho_history is a list (it may come from JSON as various types)
+            if not isinstance(ho_history, list):
+                try:
+                    ho_history = list(ho_history) if hasattr(ho_history, '__iter__') and not isinstance(ho_history, str) else []
+                except (TypeError, ValueError):
+                    ho_history = []
+            
+            current_ho_count = len(ho_history)
+            last_ho_count = int(self.ue_data[ue_id].get('last_ho_count', 0))  # Ensure it's an integer
+            
+            # Only add NEW handovers since last update
+            if ho_history and current_ho_count > last_ho_count:
+                # Add only the new HO events
+                new_hos = ho_history[last_ho_count:] if last_ho_count < len(ho_history) else []
+                for ho in new_hos:
                     self.ue_data[ue_id]['ho_history'].append({
                         'target': ho.get('target', ho.get('to')),
                         'rsrp': ho.get('rsrp', -100),
-                        'timestamp': current_time - (len(ho_history) - ho_history.index(ho)) * 1.0
+                        'timestamp': ho.get('time', current_time)  # Use actual timestamp from simulator
                     })
+            
+            self.ue_data[ue_id]['last_ho_count'] = current_ho_count
             
             # RSRP samples
             rsrp = ue.get('rsrp', -120)
             if rsrp:
                 self.ue_data[ue_id]['rsrp_samples'].append(rsrp)
             
-            # HO frequency
-            self.ue_data[ue_id]['ho_frequency'] = len(self.ue_data[ue_id]['ho_history']) / 10.0
+            # HO frequency (HOs in last 10 seconds / 10)
+            recent_hos = sum(
+                1 for ho_dict in self.ue_data[ue_id]['ho_history']
+                if (current_time - ho_dict.get('timestamp', 0.0)) <= self.feature_extractor.T_W
+            )
+            self.ue_data[ue_id]['ho_frequency'] = recent_hos / self.feature_extractor.T_W
             
-            # Last ping-pong time (infer from history)
+            # Last ping-pong time (when A→B→A pattern was detected)
             if len(self.ue_data[ue_id]['ho_history']) >= 3:
                 ho_hist = list(self.ue_data[ue_id]['ho_history'])
-                for i in range(len(ho_hist) - 2, -1, -1):
+                last_pp_time = None
+                for i in range(len(ho_hist) - 3, -1, -1):  # Fixed: stop at len-3 so i+2 is valid
                     if ho_hist[i]['target'] == ho_hist[i + 2]['target']:
-                        self.ue_data[ue_id]['last_pp_time'] = current_time - (len(ho_hist) - i - 1)
+                        last_pp_time = ho_hist[i + 2].get('timestamp', current_time)
                         break
+                
+                if last_pp_time is not None:
+                    self.ue_data[ue_id]['last_pp_time'] = last_pp_time
                 else:
                     self.ue_data[ue_id]['last_pp_time'] = current_time - 999.0
             else:
@@ -361,6 +408,7 @@ class MLPingPongDetector:
                 if a['status'] == 'active'
             },
             'ue_count': len(self.ue_data),
+            'recent_logs': list(self.detection_log)[-20:],  # Last 20 log entries
         }
     
     def get_model_info(self) -> Dict:

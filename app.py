@@ -20,6 +20,16 @@ app.config['SECRET_KEY'] = '5gnr_simulator_secret'
 
 simulator = NetworkSimulator()
 
+# Store detector status for external ML detector queries
+detector_status = {
+    'evaluation_steps': 0,
+    'active_anchors': [],
+    'cost_benefit_rejections': 0,
+    'false_positives': 0,
+    'ue_count': 0,
+    'errors': 0,
+}
+
 
 @app.route('/')
 def index():
@@ -173,6 +183,7 @@ def upload_mobility_trace():
             for k, v in row.items():
                 if v is None: continue
                 key = (k or '').strip().lower(); val = str(v).strip()
+                if not val: continue  # Skip empty values
                 if key == 'x':   x_val = float(val)
                 elif key == 'y': y_val = float(val)
                 elif key in ('t','time','timestamp'): t_val = float(val)
@@ -236,6 +247,29 @@ def reset_simulation():
 @app.route('/api/get_state', methods=['GET'])
 def get_state():
     return jsonify(simulator.get_state())
+
+
+@app.route('/api/detector_status', methods=['GET'])
+def get_detector_status():
+    """Get current ML detector status (for test validation)."""
+    global detector_status
+    return jsonify(detector_status)
+
+
+@app.route('/api/update_detector_status', methods=['POST'])
+def update_detector_status():
+    """Update detector status (called by external ML detector)."""
+    global detector_status
+    data = request.json or {}
+    detector_status = {
+        'evaluation_steps': data.get('evaluation_steps', detector_status.get('evaluation_steps', 0)),
+        'active_anchors': data.get('active_anchors', detector_status.get('active_anchors', [])),
+        'cost_benefit_rejections': data.get('cost_benefit_rejections', detector_status.get('cost_benefit_rejections', 0)),
+        'false_positives': data.get('false_positives', detector_status.get('false_positives', 0)),
+        'ue_count': data.get('ue_count', detector_status.get('ue_count', 0)),
+        'errors': data.get('errors', detector_status.get('errors', 0)),
+    }
+    return jsonify({'success': True, 'message': 'Detector status updated'})
 
 
 @app.route('/api/get_metrics', methods=['GET'])

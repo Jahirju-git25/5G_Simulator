@@ -37,8 +37,10 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     _MATPLOTLIB_OK = True
+    _MATPLOTLIB_LOCK = threading.Lock()  # Protect matplotlib operations across threads
 except ImportError:
     _MATPLOTLIB_OK = False
+    _MATPLOTLIB_LOCK = None
 
 if TYPE_CHECKING:
     from .simulator import NetworkSimulator
@@ -334,61 +336,83 @@ class AnchorManager:
 
     def _generate_ho_chart(self, ue_id, serving_gnb_id, target_gnb_id,
                            ho_time, queued_at):
+        """Generate HO RSRP vs Time chart (threadsafe)."""
         if not _MATPLOTLIB_OK:
             return
-        with self._lock:
-            srv_h = list(self.rsrp_history[ue_id].get(serving_gnb_id, []))
-            tgt_h = list(self.rsrp_history[ue_id].get(target_gnb_id, []))
-        if not srv_h or not tgt_h:
-            return
-        srv_h = srv_h[-RSRP_HISTORY_WINDOW:]; tgt_h = tgt_h[-RSRP_HISTORY_WINDOW:]
-        st=[p[0] for p in srv_h]; sr=[p[1] for p in srv_h]
-        tt=[p[0] for p in tgt_h]; tr=[p[1] for p in tgt_h]
-
-        def _at(times, rsrps, t):
-            return rsrps[min(range(len(times)), key=lambda i: abs(times[i]-t))]
-
-        srv_at = _at(st, sr, ho_time)
-        fig, ax = plt.subplots(figsize=(10,5))
-        fig.patch.set_facecolor("#0d1117"); ax.set_facecolor("#161b22")
-        ax.plot(st, sr, color="#58a6ff", linewidth=1.8,
-                label=f"Serving ({serving_gnb_id})", zorder=2)
-        ax.plot(tt, tr, color="#f0883e", linewidth=1.8,
-                label=f"Target  ({target_gnb_id})", zorder=2)
-        ax.axvline(x=ho_time, color="#f85149", linestyle="--",
-                   linewidth=1.4, alpha=0.85, zorder=3)
-        ax.plot(ho_time, srv_at, "o", markersize=18,
-                markerfacecolor="none", markeredgecolor="#f85149",
-                markeredgewidth=2.5, zorder=4)
-        ax.annotate(" HO", xy=(ho_time, srv_at+2), fontsize=11,
-                    color="#f85149", fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#21262d",
-                              edgecolor="#f85149", linewidth=1))
-        ax.set_xlabel("Simulation Time (s)", color="#8b949e", fontsize=10)
-        ax.set_ylabel("RSRP (dBm)",          color="#8b949e", fontsize=10)
-        ax.set_title(f"RSRP vs Time — {ue_id}  |  HO @ t={ho_time:.2f}s\n"
-                     f"{serving_gnb_id} → {target_gnb_id}",
-                     color="#e6edf3", fontsize=11, fontweight="bold")
-        ax.tick_params(colors="#6e7681"); ax.spines[:].set_color("#30363d")
-        ax.grid(color="#30363d", linestyle="--", linewidth=0.5, alpha=0.6)
-        ax.legend(facecolor="#1c2128", edgecolor="#30363d",
-                  labelcolor="#e6edf3", fontsize=9)
-        for lvl, lbl, col in [(-80,"−80 dBm (good)","#3fb950"),
-                               (-95,"−95 dBm (fair)","#d29922"),
-                               (-110,"−110 dBm (poor)","#f85149")]:
-            ax.axhline(y=lvl, color=col, linestyle=":", linewidth=0.8, alpha=0.5)
-            if st:
-                ax.text(min(st), lvl+0.5, lbl, color=col, fontsize=7, alpha=0.7)
-        plt.tight_layout()
-        ts_str = queued_at.strftime("%Y%m%d_%H%M%S_%f")[:21]
-        fname  = os.path.join(CHART_DIR,
-                              f"{ue_id.replace('-','')}_HO_{ts_str}.png")
+        
         try:
-            fig.savefig(fname, dpi=120, facecolor=fig.get_facecolor())
-        except Exception:
+            with self._lock:
+                if ue_id not in self.rsrp_history:
+                    return
+                serving_gnb_id = str(serving_gnb_id); target_gnb_id = str(target_gnb_id)
+                srv_h = list(self.rsrp_history[ue_id].get(serving_gnb_id, []))
+                tgt_h = list(self.rsrp_history[ue_id].get(target_gnb_id, []))
+            
+            if not srv_h or not tgt_h:
+                return
+            
+            srv_h = srv_h[-RSRP_HISTORY_WINDOW:]; tgt_h = tgt_h[-RSRP_HISTORY_WINDOW:]
+            st=[p[0] for p in srv_h]; sr=[p[1] for p in srv_h]
+            tt=[p[0] for p in tgt_h]; tr=[p[1] for p in tgt_h]
+
+            def _at(times, rsrps, t):
+                return rsrps[min(range(len(times)), key=lambda i: abs(times[i]-t))]
+
+            srv_at = _at(st, sr, ho_time)
+            
+            # Use global matplotlib lock to prevent race conditions
+            with _MATPLOTLIB_LOCK:
+                # Clean up excessive open figures before creating new one
+                import gc
+                if len(plt.get_fignums()) > 20:
+                    plt.close('all')
+                    gc.collect()
+                
+                fig, ax = plt.subplots(figsize=(10,5))
+                fig.patch.set_facecolor("#0d1117"); ax.set_facecolor("#161b22")
+                ax.plot(st, sr, color="#58a6ff", linewidth=1.8,
+                        label=f"Serving ({serving_gnb_id})", zorder=2)
+                ax.plot(tt, tr, color="#f0883e", linewidth=1.8,
+                        label=f"Target  ({target_gnb_id})", zorder=2)
+                ax.axvline(x=ho_time, color="#f85149", linestyle="--",
+                           linewidth=1.4, alpha=0.85, zorder=3)
+                ax.plot(ho_time, srv_at, "o", markersize=18,
+                        markerfacecolor="none", markeredgecolor="#f85149",
+                        markeredgewidth=2.5, zorder=4)
+                ax.annotate(" HO", xy=(ho_time, srv_at+2), fontsize=11,
+                            color="#f85149", fontweight="bold",
+                            bbox=dict(boxstyle="round,pad=0.3", facecolor="#21262d",
+                                      edgecolor="#f85149", linewidth=1))
+                ax.set_xlabel("Simulation Time (s)", color="#8b949e", fontsize=10)
+                ax.set_ylabel("RSRP (dBm)",          color="#8b949e", fontsize=10)
+                ax.set_title(f"RSRP vs Time — {ue_id}  |  HO @ t={ho_time:.2f}s\n"
+                             f"{serving_gnb_id} → {target_gnb_id}",
+                             color="#e6edf3", fontsize=11, fontweight="bold")
+                ax.tick_params(colors="#6e7681"); ax.spines[:].set_color("#30363d")
+                ax.grid(color="#30363d", linestyle="--", linewidth=0.5, alpha=0.6)
+                ax.legend(facecolor="#1c2128", edgecolor="#30363d",
+                          labelcolor="#e6edf3", fontsize=9)
+                for lvl, lbl, col in [(-80,"−80 dBm (good)","#3fb950"),
+                                       (-95,"−95 dBm (fair)","#d29922"),
+                                       (-110,"−110 dBm (poor)","#f85149")]:
+                    ax.axhline(y=lvl, color=col, linestyle=":", linewidth=0.8, alpha=0.5)
+                    if st:
+                        ax.text(min(st), lvl+0.5, lbl, color=col, fontsize=7, alpha=0.7)
+                plt.tight_layout()
+                
+                ts_str = queued_at.strftime("%Y%m%d_%H%M%S_%f")[:21]
+                fname  = os.path.join(CHART_DIR,
+                                      f"{ue_id.replace('-','')}_HO_{ts_str}.png")
+                try:
+                    fig.savefig(fname, dpi=120, facecolor=fig.get_facecolor())
+                except Exception:
+                    pass
+                finally:
+                    plt.close(fig)
+                    gc.collect()
+        except Exception as e:
+            # Silently ignore chart generation errors
             pass
-        finally:
-            plt.close(fig)
 
     # ── TCP server ───────────────────────────────────────────────────────
 

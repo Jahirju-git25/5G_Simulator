@@ -1377,6 +1377,7 @@ function Sidebar({state,onAddGnb,onAddUe,onStart,onStop,onReset,placeMode,setPla
   const numUes=Object.keys(state?.ues||{}).length;
   const [ueConfig,  setUeConfig]  = useState({mobility:'none',speed:3});
   const [gnbConfig, setGnbConfig] = useState({tx_power:43,sectors:3});
+  const [lastScenarioConfig, setLastScenarioConfig] = useState(null);
 
   const applyChannelCfg=(patch)=>{
     const next={...channelCfg,...patch};
@@ -1393,11 +1394,18 @@ function Sidebar({state,onAddGnb,onAddUe,onStart,onStop,onReset,placeMode,setPla
       if(Number.isNaN(parsed)||parsed<=0){alert('Invalid duration.');return;}
       durationToUse=parsed;
     }
-    fetch('/api/start_simulation',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({scenario,speed:simSpeed,duration:durationToUse,
-        pathloss_model:channelCfg.pathloss_model,log_dist_n:channelCfg.log_dist_n,
-        log_dist_shadow:channelCfg.log_dist_shadow,fading_model:channelCfg.fading_model})});
+    const config={scenario,speed:simSpeed,duration:durationToUse,
+      pathloss_model:channelCfg.pathloss_model,log_dist_n:channelCfg.log_dist_n,
+      log_dist_shadow:channelCfg.log_dist_shadow,fading_model:channelCfg.fading_model};
+    setLastScenarioConfig(config);
+    fetch('/api/start_simulation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
     onStart(durationToUse);
+  };
+  const handleRestart=()=>{
+    if(!lastScenarioConfig){alert('No previous scenario to restart.');return;}
+    const config=lastScenarioConfig;
+    fetch('/api/start_simulation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+    onStart(config.duration);
   };
   const handleStop=()=>{fetch('/api/stop_simulation',{method:'POST'});onStop();};
   const handleReset=()=>{fetch('/api/reset',{method:'POST'});onReset();};
@@ -1414,6 +1422,9 @@ function Sidebar({state,onAddGnb,onAddUe,onStart,onStop,onReset,placeMode,setPla
           ?<button className="btn btn-success" onClick={handleStart}>▶ Start Simulation</button>
           :<button className="btn btn-danger" onClick={handleStop}>⏹ Stop</button>}
         <button className="btn btn-secondary" onClick={handleReset}>↺ Reset</button>
+        {!isRunning&&lastScenarioConfig
+          ?<button className="btn btn-info" onClick={handleRestart} style={{marginTop:6,background:'rgba(88,166,255,0.25)',border:'1px solid #58a6ff',color:'#58a6ff'}}>🔄 Restart Scenario</button>
+          :null}
         <div className="form-group" style={{marginTop:8}}>
           <label className="form-label">Simulation Speed: {simSpeed}x</label>
           <input type="range" min="0.5" max="10" step="0.5" value={simSpeed}
@@ -1595,12 +1606,24 @@ function App() {
   const [showTraces,  setShowTraces]  = useState(false);
 
   const simTimerRef=useRef(null);
+  const justStoppedRef=useRef(false);
 
-  useEffect(()=>{ document.documentElement.setAttribute('data-theme',darkMode?'dark':'light'); },[darkMode]);
+  useEffect(()=>{ document.documentElement.setAttribute('data-theme',darkMode?'dark':'light'); },[]);
 
   useEffect(()=>{
     const es=new EventSource('/api/stream');
-    es.onmessage=e=>{ try{setState(JSON.parse(e.data));}catch{} };
+    es.onmessage=e=>{ 
+      try{
+        const newState = JSON.parse(e.data);
+        // If we just stopped, ignore SSE updates that still show running
+        // to give the backend time to register the stop
+        if(justStoppedRef.current && newState.running) {
+          return;
+        }
+        justStoppedRef.current = false;
+        setState(newState);
+      }catch{} 
+    };
     es.onerror=()=>{};
     return()=>es.close();
   },[]);
@@ -1608,11 +1631,23 @@ function App() {
   const handleStart=useCallback((duration)=>{
     if(simTimerRef.current){clearTimeout(simTimerRef.current);simTimerRef.current=null;}
     if(duration){
-      simTimerRef.current=setTimeout(()=>{fetch('/api/stop_simulation',{method:'POST'});simTimerRef.current=null;},duration*1000);
+      // Add 200ms buffer to ensure simulation actually reaches target duration
+      const timerDelay = (duration * 1000) + 200;
+      simTimerRef.current=setTimeout(()=>{
+        justStoppedRef.current = true;
+        fetch('/api/stop_simulation',{method:'POST'});
+        // Immediately update UI to show stopped (don't wait for backend)
+        setState(prev => prev ? {...prev, running: false} : null);
+        simTimerRef.current=null;
+      }, timerDelay);
     }
   },[]);
   const handleStop=useCallback(()=>{
     if(simTimerRef.current){clearTimeout(simTimerRef.current);simTimerRef.current=null;}
+    justStoppedRef.current = true;
+    fetch('/api/stop_simulation',{method:'POST'});
+    // Immediately update UI to reflect stopped state
+    setState(prev => prev ? {...prev, running: false} : null);
   },[]);
   const handlePlaceGnb=useCallback((x,y)=>{
     fetch('/api/add_gnb',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x,y,tx_power:43,num_sectors:3})});

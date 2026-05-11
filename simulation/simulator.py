@@ -202,6 +202,10 @@ class NetworkSimulator:
     def stop(self):
         self.running = False
         self._log_event("Simulation stopped")
+        # Force immediate state cache update so get_state() reflects the stop
+        state = self._build_state_dict()
+        with self._state_cache_lock:
+            self._state_cache = state
 
     def simulate_step(self):
         with self.lock:
